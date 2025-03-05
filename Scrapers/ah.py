@@ -39,6 +39,103 @@ class AlbertHeijnScraper:
         # Apply headers to the session
         self.session.headers.update(self.headers)
 
+    def get_all_categories(self):
+        """
+        Extract all available product categories from the dropdown menu
+        """
+        logger.info("Fetching all categories from dropdown menu")
+
+        try:
+            # Visit the homepage or main product page to access the menu
+            response = self.session.get(f"{self.base_url}/producten")
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch categories page: {response.status_code}")
+                return []
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Look for category elements - try different selectors based on the screenshot
+            category_selectors = [
+                '.categorie-lijst a',  # Based on your screenshot
+                '[data-testid="category-item"]',
+                '.category-menu a',
+                '.sidebar-menu a',
+                '.kies-categorie a'
+            ]
+
+            categories = []
+            for selector in category_selectors:
+                category_elements = soup.select(selector)
+                if category_elements:
+                    logger.info(f"Found {len(category_elements)} categories with selector: {selector}")
+
+                    for element in category_elements:
+                        category_name = element.get_text().strip()
+                        category_url = urljoin(self.base_url, element.get('href', ''))
+
+                        # Only add valid categories
+                        if category_name and category_url and category_url.startswith(self.base_url):
+                            categories.append({
+                                'name': category_name,
+                                'url': category_url
+                            })
+
+                    # If we found categories, no need to try other selectors
+                    if categories:
+                        break
+
+            logger.info(f"Found {len(categories)} categories")
+            return categories
+
+        except Exception as e:
+            logger.error(f"Error fetching categories: {str(e)}")
+            return []
+
+    def scrape_all_bonus_products_by_category(self, max_pages_per_category=3):
+        """
+        Scrape bonus products from all categories
+        """
+        logger.info("Starting to scrape all bonus products by category")
+
+        # Get all categories first
+        categories = self.get_all_categories()
+
+        if not categories:
+            logger.error("No categories found. Check selectors or website structure.")
+            return []
+
+        all_products = []
+
+        # Process each category
+        for category in categories:
+            logger.info(f"Processing category: {category['name']}")
+
+            # Add the bonus filter to the category URL
+            category_url = category['url']
+            if '?' in category_url:
+                category_bonus_url = f"{category_url}&kenmerk=bonus"
+            else:
+                category_bonus_url = f"{category_url}?kenmerk=bonus"
+
+            logger.info(f"Scraping bonus products from: {category_bonus_url}")
+
+            # Use existing method to scrape this category
+            category_products = self.get_all_bonus_products(category_bonus_url, max_pages=max_pages_per_category)
+
+            # Add category info to each product
+            for product in category_products:
+                product['category'] = category['name']
+
+            all_products.extend(category_products)
+
+            # Add a delay between categories to be nice to the server
+            delay = 5 + random.random() * 3
+            logger.info(f"Waiting {delay:.2f} seconds before next category...")
+            time.sleep(delay)
+
+        logger.info(f"Completed scraping all categories. Total products found: {len(all_products)}")
+        return all_products
+
     def get_all_bonus_products(self, category_url, max_pages=5):
         """
         Scrape all bonus products across multiple pages
@@ -402,18 +499,28 @@ class AlbertHeijnScraper:
 if __name__ == "__main__":
     try:
         scraper = AlbertHeijnScraper()
+
+        # You can use either of these two options:
+
+        # Option 1: Scrape a single category (as in your original code)
+        logger.info("Starting to scrape a single category")
         category_url = "https://www.ah.nl/producten/6401/groente-aardappelen?kenmerk=bonus"
 
         # Check if the page uses AJAX loading for pagination
         uses_ajax = scraper.check_ajax_loading(category_url)
         logger.info(f"Does the page use AJAX loading? {uses_ajax}")
 
-        # Get all bonus products across multiple pages
-        all_products = scraper.get_all_bonus_products(category_url, max_pages=5)
+        # Get all bonus products across multiple pages for this category
+        products = scraper.get_all_bonus_products(category_url, max_pages=5)
 
-        if all_products:
+        # Option 2: Scrape all categories (uncomment to use)
+        # logger.info("Starting to scrape all categories")
+        # products = scraper.scrape_all_bonus_products_by_category(max_pages_per_category=3)
+
+        if products:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            scraper.save_to_csv(all_products, f"ah_bonus_products_{timestamp}.csv")
+            scraper.save_to_csv(products, f"ah_bonus_products_{timestamp}.csv")
+            logger.info(f"Completed scraping with {len(products)} products saved")
         else:
             logger.error("No products were retrieved. Check the logs for errors.")
 
