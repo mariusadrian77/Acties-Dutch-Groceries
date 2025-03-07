@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -169,6 +170,40 @@ class AlbertHeijnAPIConnector:
             logger.error(f"Failed to get bonus periods: {e}")
             return []
 
+    def get_bonus_periods_groups_or_products(self, url):
+        """Get bonus groups or products from a specific URL"""
+        logger.info(f"Getting bonus data from URL: {url}")
+        try:
+            response = requests.get(
+                f"{self.base_url}/mobile-services/{url}",
+                headers=self._get_auth_headers()
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error getting bonus data: {e}")
+            return {"bonusGroupOrProducts": []}
+
+    def get_bonus_group_products(self, group_id, date):
+        """Get products for a specific bonus group"""
+        logger.info(f"Getting products for bonus group {group_id}")
+        try:
+            date_str = date.strftime('%Y-%m-%d')
+            response = requests.get(
+                f"{self.base_url}/mobile-services/bonuspage/v1/segment",
+                headers=self._get_auth_headers(),
+                params={
+                    "date": date_str,
+                    "segmentId": group_id,
+                    "includeActivatableDiscount": "false"
+                }
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error getting bonus group products: {e}")
+            return {"products": []}
+
     def process_products_to_dict(self, products):
         """Process products into a standardized dictionary format with limited fields"""
         processed_products = []
@@ -248,8 +283,6 @@ class AlbertHeijnAPIConnector:
             logger.warning("No products to save")
             return
 
-        import os
-
         # Create products directory if it doesn't exist
         os.makedirs("products", exist_ok=True)
 
@@ -264,9 +297,9 @@ class AlbertHeijnAPIConnector:
         df.to_csv(filepath, index=False)
         logger.info(f"Saved {len(products)} products to {filepath}")
 
-    def scrape_all_categories(self):
-        """Scrape products from all categories"""
-        logger.info("Starting to scrape all categories")
+    def scrape_all_categories_bonus_only(self):
+        """Scrape only bonus products from all categories"""
+        logger.info("Starting to scrape bonus products from all categories")
 
         # Get all categories
         categories = self.get_categories()
@@ -276,7 +309,7 @@ class AlbertHeijnAPIConnector:
 
         logger.info(f"Found {len(categories)} categories")
 
-        all_products = []
+        all_bonus_products = []
 
         # Process each category
         for category in categories:
@@ -289,20 +322,20 @@ class AlbertHeijnAPIConnector:
 
                 logger.info(f"Processing category: {category_name} (ID: {category_id})")
 
-                # Get products for this category
-                products = self.search_all_products(taxonomy_id=category_id)
+                # Get only bonus products for this category
+                products = self.search_all_products(taxonomy_id=category_id, bonus_only=True)
                 processed_products = self.process_products_to_dict(products)
 
-                logger.info(f"Found {len(processed_products)} products in category {category_name}")
+                logger.info(f"Found {len(processed_products)} bonus products in category {category_name}")
 
-                # Save products for this category
+                # Save bonus products for this category
                 if processed_products:
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    category_filename = f"ah_{category_name.lower()}_{timestamp}.csv"
+                    category_filename = f"ah_bonus_{category_name.lower()}_{timestamp}.csv"
                     self.save_to_csv(processed_products, category_filename)
 
                 # Add to overall collection
-                all_products.extend(processed_products)
+                all_bonus_products.extend(processed_products)
 
                 # Add a delay between categories to be nice to the server
                 time.sleep(1)
@@ -310,23 +343,89 @@ class AlbertHeijnAPIConnector:
             except Exception as e:
                 logger.error(f"Error processing category: {e}")
 
-        # Save all products combined
-        if all_products:
+        # Save all bonus products combined
+        if all_bonus_products:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            self.save_to_csv(all_products, f"ah_all_categories_{timestamp}.csv")
+            self.save_to_csv(all_bonus_products, f"ah_all_bonus_products_{timestamp}.csv")
 
-        logger.info(f"Completed scraping all categories. Total products found: {len(all_products)}")
-        return all_products
+        logger.info(f"Completed scraping all categories. Total bonus products found: {len(all_bonus_products)}")
+        return all_bonus_products
+
+    def get_all_bonus_products_alternative(self):
+        """Alternative method to get all bonus products directly"""
+        logger.info("Getting all bonus products using direct API call")
+
+        try:
+            # Get the current bonus periods
+            bonus_periods = self.get_bonus_periods()
+
+            all_bonus_products = []
+
+            # Process each period
+            for period in bonus_periods:
+                start_date = period.get('bonusStartDate')
+                end_date = period.get('bonusEndDate')
+                logger.info(f"Processing bonus period: {start_date} to {end_date}")
+
+                # Process each URL in the period
+                url_metadata_list = period.get('urlMetadataList', [])
+                for url_metadata in url_metadata_list:
+                    url = url_metadata.get('url')
+                    if not url:
+                        continue
+
+                    # Get bonus groups or products for this URL
+                    try:
+                        bonus_data = self.get_bonus_periods_groups_or_products(url)
+                        bonus_items = bonus_data.get('bonusGroupOrProducts', [])
+
+                        for item in bonus_items:
+                            # Direct product
+                            if 'product' in item:
+                                product = item['product']
+                                processed = self.process_products_to_dict([product])
+                                all_bonus_products.extend(processed)
+
+                            # Bonus group
+                            elif 'bonusGroup' in item:
+                                group_id = item['bonusGroup'].get('id')
+                                if group_id:
+                                    # Get products for this bonus group
+                                    group_products = self.get_bonus_group_products(
+                                        group_id,
+                                        datetime.now()
+                                    ).get('products', [])
+
+                                    processed = self.process_products_to_dict(group_products)
+                                    all_bonus_products.extend(processed)
+                    except Exception as e:
+                        logger.error(f"Error processing bonus URL {url}: {e}")
+
+            # Save all bonus products
+            if all_bonus_products:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                self.save_to_csv(all_bonus_products, f"ah_all_bonus_direct_{timestamp}.csv")
+
+            logger.info(f"Completed direct bonus scraping. Total products found: {len(all_bonus_products)}")
+            return all_bonus_products
+
+        except Exception as e:
+            logger.error(f"Error in direct bonus scraping: {e}")
+            return []
 
 
-# Example usage: Scrape products from all categories
+# Example usage: Scrape only bonus products from all categories
 if __name__ == "__main__":
     try:
         # Initialize the API connector
         api = AlbertHeijnAPIConnector()
 
-        # Scrape all categories
-        api.scrape_all_categories()
+        # Option 1: Scrape bonus products from all categories
+        api.scrape_all_categories_bonus_only()
+
+        # Option 2: Alternative method to get bonus products directly
+        # This uses the bonus periods API which may be more accurate for current offers
+        # api.get_all_bonus_products_alternative()
 
     except Exception as e:
         logger.error(f"Script failed: {e}")
